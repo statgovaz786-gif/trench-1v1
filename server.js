@@ -1,49 +1,76 @@
-const express=require('express'),http=require('http'),WebSocket=require('ws');
-const app=express(),server=http.createServer(app),wss=new WebSocket.Server({server}),rooms=new Map();
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const path = require("path");
 
-const html=`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no"><title>Trench 1v1</title><style>body{margin:0;background:#171614;color:#eee;font:16px Arial;text-align:center}#m{max-width:480px;margin:8vh auto;padding:25px;background:#29261f;border-radius:12px}button,input{padding:14px;border:0;border-radius:8px;margin:5px;font-weight:bold}input{background:#111;color:white;text-transform:uppercase}#g{display:none;height:100vh;flex-direction:column}.top,.bar{background:#211f1b;padding:12px;display:flex;justify-content:space-around}.bar button{flex:1;background:#d7c49a}canvas{flex:1;width:100%;background:#756b58}</style><div id=m><h1>TRENCH 1v1</h1><button id=c>OTAQ YARAT</button><br><input id=i maxlength=6 placeholder="OTAQ KODU"><button id=j>QOŞUL</button><p id=msg></p></div><div id=g><div class=top><b id=s></b><b id=r></b></div><canvas id=cv></canvas><div class=bar><button onclick="sp('K')">KƏŞFİYYAT<br>20</button><button onclick="sp('M')">MÜDAFİƏ<br>30</button><button onclick="sp('Z')">ZİREHLİ<br>60</button></div></div><script>let w,me,code,u=[],sel,cv=document.getElementById('cv'),x=cv.getContext('2d');function con(){w=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);w.onmessage=e=>{let m=JSON.parse(e.data);if(m.type==='room'){me=m.side;code=m.code;msg.textContent='Kod: '+code}if(m.type==='start'){mdiv.style.display='none';g.style.display='flex';resize();requestAnimationFrame(loop)}if(m.type==='state')u=m.units;if(m.type==='error')msg.textContent=m.message}}c.onclick=()=>{con();setTimeout(()=>w.send(JSON.stringify({t:'create'})),150)};j.onclick=()=>{con();setTimeout(()=>w.send(JSON.stringify({t:'join',code:i.value})),150)};function send(){if(w?.readyState===1)w.send(JSON.stringify({t:'state',units:u}))}function sp(t){u.push({o:me,t,x:me==='A'?50:cv.width-50,y:80+Math.random()*(cv.height-160)});send()}function resize(){cv.width=cv.clientWidth;cv.height=cv.clientHeight}s.textContent='';addEventListener('resize',resize);cv.onpointerdown=e=>{let q=cv.getBoundingClientRect(),X=e.clientX-q.left,Y=e.clientY-q.top;sel=u.find(a=>a.o===me&&Math.hypot(a.x-X,a.y-Y)<28)};cv.onpointerup=e=>{if(!sel)return;let q=cv.getBoundingClientRect();sel.x=e.clientX-q.left;sel.y=e.clientY-q.top;sel=null;send()};function draw(){x.fillStyle='#756b58';x.fillRect(0,0,cv.width,cv.height);x.fillStyle='#554c3e';for(let y=55;y<cv.height;y+=105)x.fillRect(0,y,cv.width,22);u.forEach(a=>{x.fillStyle=a.o==='A'?'#4d83ad':'#ad4d4d';x.beginPath();x.arc(a.x,a.y,a.t==='Z'?18:13,0,7);x.fill();x.fillStyle='#111';x.font='bold 10px Arial';x.fillText(a.t,a.x-4,a.y+4)})}function loop(){draw();requestAnimationFrame(loop)}let mdiv=document.getElementById('m'),g=document.getElementById('g');</script>`;
+const app = express();
+app.use(express.static(path.join(__dirname, "public")));
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-app.get('/',(_,res)=>res.type('html').send(html));
+const rooms = new Map();
 
-wss.on('connection',ws=>{
-  let room,side;
-  ws.on('message',raw=>{
-    let m;
-    try{m=JSON.parse(raw)}catch{return}
+function send(ws, data) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+}
 
-    if(m.t==='create'){
-      let code;
-      do{code=Math.random().toString(36).slice(2,8).toUpperCase()}while(rooms.has(code));
-      room={code,players:[],units:[]};
-      rooms.set(code,room);
-      side='A';
-      room.players.push(ws);
-      ws.send(JSON.stringify({type:'room',code,side}))
+function broadcast(room, data) {
+  for (const p of room.players) send(p.ws, data);
+}
+
+function makeRoomCode() {
+  let code;
+  do code = Math.random().toString(36).slice(2, 8).toUpperCase();
+  while (rooms.has(code));
+  return code;
+}
+
+wss.on("connection", ws => {
+  let room = null, player = null;
+
+  ws.on("message", raw => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+
+    if (msg.type === "create") {
+      const code = makeRoomCode();
+      room = { code, players: [], state: { units: [] } };
+      rooms.set(code, room);
+      player = { ws, side: "blue" };
+      room.players.push(player);
+      send(ws, { type:"created", code, side:"blue" });
+      return;
     }
-    else if(m.t==='join'){
-      let r=rooms.get(String(m.code).toUpperCase());
-      if(!r)return ws.send(JSON.stringify({type:'error',message:'Otaq tapılmadı'}));
-      if(r.players.length>=2)return ws.send(JSON.stringify({type:'error',message:'Otaq doludur'}));
-      room=r;
-      side='B';
-      r.players.push(ws);
-      ws.send(JSON.stringify({type:'room',code:r.code,side}));
-      r.players.forEach(p=>p.send(JSON.stringify({type:'start'})))
+
+    if (msg.type === "join") {
+      const r = rooms.get(String(msg.code || "").toUpperCase());
+      if (!r) return send(ws, { type:"error", message:"Otaq tapılmadı." });
+      if (r.players.length >= 2) return send(ws, { type:"error", message:"Otaq doludur." });
+      room = r;
+      player = { ws, side:"red" };
+      room.players.push(player);
+      send(ws, { type:"joined", code:r.code, side:"red" });
+      broadcast(r, { type:"start", players:r.players.map(p=>p.side) });
+      return;
     }
-    else if(m.t==='state'&&room){
-      room.units=m.units||[];
-      room.players.forEach(p=>{
-        if(p!==ws)p.send(JSON.stringify({type:'state',units:room.units}))
-      })
+
+    if (!room || !player) return;
+
+    if (msg.type === "state") {
+      room.state = msg.state;
+      for (const p of room.players) {
+        if (p !== player) send(p.ws, { type:"state", state:room.state });
+      }
     }
   });
 
-  ws.on('close',()=>{
-    if(room){
-      room.players=room.players.filter(p=>p!==ws);
-      if(!room.players.length)rooms.delete(room.code)
-    }
-  })
+  ws.on("close", () => {
+    if (!room) return;
+    room.players = room.players.filter(p => p.ws !== ws);
+    for (const p of room.players) send(p.ws, { type:"opponent_left" });
+    if (room.players.length === 0) rooms.delete(room.code);
+  });
 });
 
-server.listen(process.env.PORT||3000);
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Trench 1v1 running on port ${PORT}`));
